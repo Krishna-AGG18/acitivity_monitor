@@ -83,23 +83,30 @@ fn ensure_single_instance() {
         .collect();
 
     unsafe {
-        let _handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        let err = GetLastError();
+        if err == ERROR_ALREADY_EXISTS {
+            tracing::info!("Another instance is already running (GetLastError = 183). Exiting.");
             let title: Vec<u16> = "StealthMon\0".encode_utf16().collect();
             let msg: Vec<u16> = "An instance of StealthMon is already running.\0"
                 .encode_utf16()
                 .collect();
             MessageBoxW(0, msg.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION);
             std::process::exit(0);
+        } else if handle == 0 {
+            tracing::error!("Failed to create mutex. GetLastError = {}", err);
+        } else {
+            tracing::info!("Mutex created successfully. We are the first instance.");
+            // We leak the handle on purpose so it lives for the duration of the process.
         }
     }
 }
 
 fn main() {
-    ensure_single_instance();
-
     let data_dir = get_data_dir();
     setup_logging(&data_dir);
+
+    ensure_single_instance();
 
     tracing::info!("StealthMon starting up");
     tracing::info!("Data directory: {}", data_dir.display());
@@ -193,10 +200,7 @@ fn main() {
                     cancel.cancel();
                     // Give tasks a moment to flush
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    unsafe {
-                        windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-                    }
-                    break;
+                    std::process::exit(0);
                 }
             }
             // Sleep briefly to avoid busy-spinning
