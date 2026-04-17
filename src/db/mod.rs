@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDateTime, Utc};
+use chrono::Utc;
 use rusqlite::params;
 use serde::Serialize;
 use std::sync::Arc;
@@ -23,14 +23,14 @@ pub struct HourlyStat {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct DailyAvgStat {
+pub struct DailyStat {
     pub day: String,
-    pub left_clicks: f64,
-    pub right_clicks: f64,
-    pub middle_clicks: f64,
-    pub keypresses: f64,
+    pub left_clicks: i64,
+    pub right_clicks: i64,
+    pub middle_clicks: i64,
+    pub keypresses: i64,
     pub mouse_feet: f64,
-    pub controller_buttons: f64,
+    pub controller_buttons: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -277,92 +277,6 @@ impl Database {
             .await
     }
 
-    /// Query average daily stats per weekday (Sun–Sat).
-    pub async fn query_daily_avg_stats(
-        &self,
-    ) -> Result<Vec<DailyAvgStat>, tokio_rusqlite::Error> {
-        self.conn
-            .call(|conn| {
-                // Aggregate hourly_stats by date, then average per weekday
-                let mut stmt = conn.prepare(
-                    "SELECT
-                       substr(hour_bucket, 1, 10) as day_date,
-                       SUM(keypresses) as kp,
-                       SUM(left_clicks) as lc,
-                       SUM(right_clicks) as rc,
-                       SUM(middle_clicks) as mc,
-                       SUM(mouse_feet) as mf,
-                       SUM(controller_buttons) as cb
-                     FROM hourly_stats
-                     GROUP BY day_date
-                     ORDER BY day_date",
-                )?;
-
-                // Collect per-date totals
-                struct DayData {
-                    date: String,
-                    kp: i64,
-                    lc: i64,
-                    rc: i64,
-                    mc: i64,
-                    mf: f64,
-                    cb: i64,
-                }
-
-                let rows: Vec<DayData> = stmt
-                    .query_map([], |row| {
-                        Ok(DayData {
-                            date: row.get(0)?,
-                            kp: row.get(1)?,
-                            lc: row.get(2)?,
-                            rc: row.get(3)?,
-                            mc: row.get(4)?,
-                            mf: row.get(5)?,
-                            cb: row.get(6)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-
-                // Group by weekday (0=Sun, 6=Sat)
-                let day_names = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-                let mut sums: [(f64, f64, f64, f64, f64, f64, f64); 7] =
-                    [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0); 7];
-
-                for d in &rows {
-                    if let Ok(nd) = NaiveDateTime::parse_from_str(
-                        &format!("{}T00:00:00", d.date),
-                        "%Y-%m-%dT%H:%M:%S",
-                    ) {
-                        let weekday = nd.weekday().num_days_from_sunday() as usize;
-                        sums[weekday].0 += 1.0; // count
-                        sums[weekday].1 += d.lc as f64;
-                        sums[weekday].2 += d.rc as f64;
-                        sums[weekday].3 += d.mc as f64;
-                        sums[weekday].4 += d.kp as f64;
-                        sums[weekday].5 += d.mf;
-                        sums[weekday].6 += d.cb as f64;
-                    }
-                }
-
-                let result: Vec<DailyAvgStat> = (0..7)
-                    .map(|i| {
-                        let count = if sums[i].0 > 0.0 { sums[i].0 } else { 1.0 };
-                        DailyAvgStat {
-                            day: day_names[i].to_string(),
-                            left_clicks: (sums[i].1 / count).round(),
-                            right_clicks: (sums[i].2 / count).round(),
-                            middle_clicks: (sums[i].3 / count).round(),
-                            keypresses: (sums[i].4 / count).round(),
-                            mouse_feet: ((sums[i].5 / count) * 100.0).round() / 100.0,
-                            controller_buttons: (sums[i].6 / count).round(),
-                        }
-                    })
-                    .collect();
-
-                Ok(result)
-            })
-            .await
-    }
 
     /// Query app distribution for the past N days.
     pub async fn query_app_distribution(
@@ -412,10 +326,15 @@ impl Database {
             .await
     }
 
-    /// Query all-time totals.
-    pub async fn query_totals_all_time(&self) -> Result<Totals, tokio_rusqlite::Error> {
+    /// Query totals for the requested time range.
+    pub async fn query_totals_range(
+        &self,
+        hours_back: u32,
+    ) -> Result<Totals, tokio_rusqlite::Error> {
         self.conn
-            .call(|conn| {
+            .call(move |conn| {
+                let cutoff = Utc::now() - chrono::Duration::hours(hours_back as i64);
+                let cutoff_str = cutoff.format("%Y-%m-%dT%H:00").to_string();
                 let mut stmt = conn.prepare(
                     "SELECT
                        COALESCE(SUM(keypresses), 0),
@@ -424,9 +343,10 @@ impl Database {
                        COALESCE(SUM(middle_clicks), 0),
                        COALESCE(SUM(mouse_feet), 0.0),
                        COALESCE(SUM(controller_buttons), 0)
-                     FROM hourly_stats",
+                     FROM hourly_stats
+                     WHERE hour_bucket >= ?1",
                 )?;
-                let totals = stmt.query_row([], |row| {
+                let totals = stmt.query_row(params![cutoff_str], |row| {
                     Ok(Totals {
                         keypresses: row.get(0)?,
                         left_clicks: row.get(1)?,
@@ -441,13 +361,25 @@ impl Database {
             .await
     }
 
-    /// Query the past 24 hours timeline, one point per hour bucket.
-    pub async fn query_24h_timeline(
+    /// Query the past time range timeline, aggregated hourly for 24h and daily otherwise.
+    pub async fn query_timeline_range(
         &self,
+        hours_back: u32,
+    ) -> Result<Vec<TimelinePoint>, tokio_rusqlite::Error> {
+        if hours_back <= 24 {
+            return self.query_hourly_timeline(hours_back).await;
+        }
+
+        self.query_daily_timeline((hours_back + 23) / 24).await
+    }
+
+    async fn query_hourly_timeline(
+        &self,
+        hours_back: u32,
     ) -> Result<Vec<TimelinePoint>, tokio_rusqlite::Error> {
         self.conn
-            .call(|conn| {
-                let cutoff = Utc::now() - chrono::Duration::hours(24);
+            .call(move |conn| {
+                let cutoff = Utc::now() - chrono::Duration::hours(hours_back as i64);
                 let cutoff_str = cutoff.format("%Y-%m-%dT%H:00").to_string();
                 let mut stmt = conn.prepare(
                     "SELECT hour_bucket, keypresses, left_clicks, right_clicks,
@@ -473,4 +405,76 @@ impl Database {
             })
             .await
     }
+
+    async fn query_daily_timeline(
+        &self,
+        days_back: u32,
+    ) -> Result<Vec<TimelinePoint>, tokio_rusqlite::Error> {
+        self.conn
+            .call(move |conn| {
+                let cutoff = Utc::now() - chrono::Duration::days(days_back as i64);
+                let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+                let mut stmt = conn.prepare(
+                    "SELECT substr(hour_bucket, 1, 10) as day_bucket,
+                            SUM(keypresses), SUM(left_clicks), SUM(right_clicks),
+                            SUM(middle_clicks), SUM(mouse_feet), SUM(controller_buttons)
+                     FROM hourly_stats
+                     WHERE hour_bucket >= ?1
+                     GROUP BY day_bucket
+                     ORDER BY day_bucket ASC",
+                )?;
+                let rows = stmt
+                    .query_map(params![cutoff_str], |row| {
+                        Ok(TimelinePoint {
+                            hour_bucket: row.get(0)?,
+                            keypresses: row.get(1)?,
+                            left_clicks: row.get(2)?,
+                            right_clicks: row.get(3)?,
+                            middle_clicks: row.get(4)?,
+                            mouse_feet: row.get(5)?,
+                            controller_buttons: row.get(6)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
+    /// Query daily totals for the requested time range.
+    pub async fn query_daily_stats(
+        &self,
+        days_back: u32,
+    ) -> Result<Vec<DailyStat>, tokio_rusqlite::Error> {
+        self.conn
+            .call(move |conn| {
+                let cutoff = Utc::now() - chrono::Duration::days(days_back as i64);
+                let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+                let mut stmt = conn.prepare(
+                    "SELECT substr(hour_bucket, 1, 10) as day_date,
+                            SUM(keypresses), SUM(left_clicks), SUM(right_clicks),
+                            SUM(middle_clicks), SUM(mouse_feet), SUM(controller_buttons)
+                     FROM hourly_stats
+                     WHERE hour_bucket >= ?1
+                     GROUP BY day_date
+                     ORDER BY day_date DESC",
+                )?;
+                let rows = stmt
+                    .query_map(params![cutoff_str], |row| {
+                        Ok(DailyStat {
+                            day: row.get(0)?,
+                            keypresses: row.get(1)?,
+                            left_clicks: row.get(2)?,
+                            right_clicks: row.get(3)?,
+                            middle_clicks: row.get(4)?,
+                            mouse_feet: row.get(5)?,
+                            controller_buttons: row.get(6)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+    }
 }
+
