@@ -61,6 +61,89 @@
         margin-bottom: 18px;
       }
 
+      .range-row {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 20px;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .welcome-section {
+        background: linear-gradient(
+          135deg,
+          rgba(78, 196, 255, 0.12) 0%,
+          rgba(72, 232, 199, 0.12) 100%
+        );
+        border: 1px solid rgba(109, 213, 255, 0.16);
+        border-radius: 16px;
+        padding: 24px;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+
+      .welcome-emoji {
+        font-size: 3rem;
+        animation: wave 2s ease-in-out infinite;
+      }
+
+      @keyframes wave {
+        0%,
+        100% {
+          transform: rotate(0deg);
+        }
+        25% {
+          transform: rotate(20deg);
+        }
+        75% {
+          transform: rotate(-20deg);
+        }
+      }
+
+      .welcome-text {
+        flex: 1;
+      }
+
+      .welcome-text h2 {
+        color: #d7ebff;
+        font-size: 1.6rem;
+        margin-bottom: 6px;
+        font-weight: 600;
+      }
+
+      .welcome-text p {
+        color: #b5d4f1;
+        font-size: 1rem;
+        margin: 0;
+      }
+
+      .range-row {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 20px;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .range-row label {
+        color: #c7e7ff;
+        font-size: 0.95rem;
+        letter-spacing: 0.8px;
+      }
+
+      .range-row select {
+        min-width: 170px;
+        padding: 10px 12px;
+        border: 1px solid rgba(109, 213, 255, 0.22);
+        border-radius: 12px;
+        background: rgba(7, 15, 25, 0.95);
+        color: #eaf4ff;
+        font-family: Inter, system-ui, sans-serif;
+        font-size: 0.95rem;
+      }
+
       .header h1 {
         font-size: 2rem;
         font-weight: 600;
@@ -319,6 +402,24 @@
         <span class="last-updated" id="lastUpdated">loading...</span>
       </div>
 
+      <div class="welcome-section">
+        <div class="welcome-emoji">👋</div>
+        <div class="welcome-text">
+          <h2>Welcome, <span id="usernameDisplay">loading...</span>!</h2>
+          <p>Here's your activity snapshot — keep grinding! ✨</p>
+        </div>
+      </div>
+
+      <div class="range-row">
+        <label for="rangeSelect">Show data for:</label>
+        <select id="rangeSelect">
+          <option value="24h">Past 24hrs</option>
+          <option value="7d">Past week</option>
+          <option value="30d">Past month</option>
+          <option value="365d">Past year</option>
+        </select>
+      </div>
+
       <div class="meta-row">
         <div class="meta-card">
           <div class="label">active apps</div>
@@ -389,7 +490,7 @@
 
       <!-- Daily Average Table -->
       <div class="daily-section">
-        <h2>avg daily activity</h2>
+        <h2>daily activity</h2>
         <table class="daily-table" id="dailyTable">
           <thead>
             <tr>
@@ -448,7 +549,40 @@
         "#cedbff",
       ];
 
+      const rangeLabels = {
+        "24h": "Past 24hrs",
+        "7d": "Past week",
+        "30d": "Past month",
+        "365d": "Past year",
+      };
+
       let donutChart, radarChart, timelineChart;
+
+      function selectedRange() {
+        return document.getElementById("rangeSelect").value;
+      }
+
+      function formatTimelineLabel(bucket) {
+        const range = selectedRange();
+        if (range === "24h") {
+          const date = new Date(bucket + ":00Z");
+          if (!isNaN(date.getTime())) {
+            return date.toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            });
+          }
+        }
+        const date = new Date(bucket);
+        if (!isNaN(date.getTime())) {
+          return date.toLocaleDateString([], {
+            month: "short",
+            day: "numeric",
+          });
+        }
+        return bucket;
+      }
 
       // ─── Donut Chart ─────────────────────────────────
       function renderDonut(data) {
@@ -494,15 +628,20 @@
               legend: {
                 position: "bottom",
                 labels: {
-                  color: "#ffffff",
+                  color: "#d7ebff",
                   padding: 12,
-                  font: { size: 12, family: "Inter, system-ui, sans-serif" },
+                  font: {
+                    size: 12,
+                    family: "Inter, system-ui, sans-serif",
+                    weight: "600",
+                  },
                   boxWidth: 14,
                   generateLabels: function (chart) {
                     const ds = chart.data.datasets[0];
                     return chart.data.labels.map((label, i) => ({
                       text: `${label} (${ds.data[i]}%)`,
                       fillStyle: ds.backgroundColor[i],
+                      fontColor: "#d7ebff",
                       strokeStyle: "#0d0d0d",
                       lineWidth: 1,
                       index: i,
@@ -613,20 +752,7 @@
         const ctx = document.getElementById("timelineChart").getContext("2d");
 
         // Convert UTC hour_bucket to local time using the browser's timezone
-        const labels = data.map((d) => {
-          try {
-            // hour_bucket is like "2026-04-16T14:00" (UTC)
-            // Append ":00Z" to make it a valid ISO 8601 UTC timestamp
-            const utcDate = new Date(d.hour_bucket + ":00Z");
-            return utcDate.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: true,
-            });
-          } catch {
-            return d.hour_bucket;
-          }
-        });
+        const labels = data.map((d) => formatTimelineLabel(d.hour_bucket));
 
         if (timelineChart) timelineChart.destroy();
         timelineChart = new Chart(ctx, {
@@ -810,12 +936,28 @@
         }
       }
 
+      async function loadUsername() {
+        try {
+          const res = await fetchJSON("/api/username");
+          if (res && res.username) {
+            document.getElementById("usernameDisplay").textContent =
+              res.username;
+          } else {
+            document.getElementById("usernameDisplay").textContent = "Pardon";
+          }
+        } catch (e) {
+          console.error("Failed to load username:", e);
+          document.getElementById("usernameDisplay").textContent = "Pardon";
+        }
+      }
+
       async function loadAllData() {
-        const [totals, timeline, appDist, dailyAvg] = await Promise.all([
-          fetchJSON("/api/totals"),
-          fetchJSON("/api/timeline"),
-          fetchJSON("/api/app-distribution"),
-          fetchJSON("/api/daily-avg"),
+        const range = selectedRange();
+        const [totals, timeline, appDist, dailyStats] = await Promise.all([
+          fetchJSON(`/api/totals?range=${range}`),
+          fetchJSON(`/api/timeline?range=${range}`),
+          fetchJSON(`/api/app-distribution?range=${range}`),
+          fetchJSON(`/api/daily-avg?range=${range}`),
         ]);
 
         if (totals) renderStats(totals);
@@ -825,7 +967,7 @@
           renderRadar(appDist);
         }
         if (timeline) renderTimeline(timeline);
-        if (dailyAvg) renderDailyAvg(dailyAvg);
+        if (dailyStats) renderDailyAvg(dailyStats);
 
         // Update timestamp
         const now = new Date();
@@ -833,7 +975,12 @@
           `last updated: ${now.toLocaleTimeString("en-US", { hour12: true, hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
       }
 
+      document
+        .getElementById("rangeSelect")
+        .addEventListener("change", loadAllData);
+
       // ─── Init + Auto-refresh ─────────────────────────
+      loadUsername();
       loadAllData();
       setInterval(loadAllData, 60_000);
     </script>
